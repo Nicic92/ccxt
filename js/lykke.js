@@ -11,7 +11,7 @@ module.exports = class lykke extends Exchange {
         return this.deepExtend (super.describe (), {
             'id': 'lykke',
             'name': 'Lykke',
-            'countries': 'CH',
+            'countries': [ 'CH' ],
             'version': 'v1',
             'rateLimit': 200,
             'has': {
@@ -20,6 +20,7 @@ module.exports = class lykke extends Exchange {
                 'fetchTrades': false,
                 'fetchOpenOrders': true,
                 'fetchClosedOrders': true,
+                'fetchOrder': true,
                 'fetchOrders': true,
             },
             'requiredCredentials': {
@@ -29,11 +30,11 @@ module.exports = class lykke extends Exchange {
             'urls': {
                 'logo': 'https://user-images.githubusercontent.com/1294454/34487620-3139a7b0-efe6-11e7-90f5-e520cef74451.jpg',
                 'api': {
-                    'mobile': 'https://api.lykkex.com/api',
+                    'mobile': 'https://public-api.lykke.com/api',
                     'public': 'https://hft-api.lykke.com/api',
                     'private': 'https://hft-api.lykke.com/api',
                     'test': {
-                        'mobile': 'https://api.lykkex.com/api',
+                        'mobile': 'https://public-api.lykke.com/api',
                         'public': 'https://hft-service-dev.lykkex.net/api',
                         'private': 'https://hft-service-dev.lykkex.net/api',
                     },
@@ -48,7 +49,7 @@ module.exports = class lykke extends Exchange {
             'api': {
                 'mobile': {
                     'get': [
-                        'AllAssetPairRates/{market}',
+                        'Market/{market}',
                     ],
                 },
                 'public': {
@@ -77,8 +78,8 @@ module.exports = class lykke extends Exchange {
                 'trading': {
                     'tierBased': false,
                     'percentage': true,
-                    'maker': 0.0010,
-                    'taker': 0.0019,
+                    'maker': 0.0, // as of 7 Feb 2018, see https://github.com/ccxt/ccxt/issues/1863
+                    'taker': 0.0, // https://www.lykke.com/cp/wallet-fees-and-limits
                 },
                 'funding': {
                     'tierBased': false,
@@ -160,7 +161,6 @@ module.exports = class lykke extends Exchange {
                 'quote': quote,
                 'active': true,
                 'info': market,
-                'lot': Math.pow (10, -precision['amount']),
                 'precision': precision,
                 'limits': {
                     'amount': {
@@ -182,25 +182,27 @@ module.exports = class lykke extends Exchange {
         let symbol = undefined;
         if (market)
             symbol = market['symbol'];
-        ticker = ticker['Result'];
+        let close = parseFloat (ticker['lastPrice']);
         return {
             'symbol': symbol,
             'timestamp': timestamp,
             'datetime': this.iso8601 (timestamp),
             'high': undefined,
             'low': undefined,
-            'bid': parseFloat (ticker['Rate']['Bid']),
-            'ask': parseFloat (ticker['Rate']['Ask']),
+            'bid': parseFloat (ticker['bid']),
+            'bidVolume': undefined,
+            'ask': parseFloat (ticker['ask']),
+            'askVolume': undefined,
             'vwap': undefined,
             'open': undefined,
-            'close': undefined,
-            'first': undefined,
-            'last': undefined,
+            'close': close,
+            'last': close,
+            'previousClose': undefined,
             'change': undefined,
             'percentage': undefined,
             'average': undefined,
             'baseVolume': undefined,
-            'quoteVolume': undefined,
+            'quoteVolume': parseFloat (ticker['volume24H']),
             'info': ticker,
         };
     }
@@ -208,7 +210,7 @@ module.exports = class lykke extends Exchange {
     async fetchTicker (symbol, params = {}) {
         await this.loadMarkets ();
         let market = this.market (symbol);
-        let ticker = await this.mobileGetAllAssetPairRatesMarket (this.extend ({
+        let ticker = await this.mobileGetMarketMarket (this.extend ({
             'market': market['id'],
         }, params));
         return this.parseTicker (ticker, market);
@@ -240,7 +242,7 @@ module.exports = class lykke extends Exchange {
     parseOrder (order, market = undefined) {
         let status = this.parseOrderStatus (order['Status']);
         let symbol = undefined;
-        if (!market) {
+        if (typeof market === 'undefined') {
             if ('AssetPairId' in order)
                 if (order['AssetPairId'] in this.markets_by_id)
                     market = this.markets_by_id[order['AssetPairId']];
@@ -248,11 +250,11 @@ module.exports = class lykke extends Exchange {
         if (market)
             symbol = market['symbol'];
         let timestamp = undefined;
-        if ('LastMatchTime' in order) {
+        if (('LastMatchTime' in order) && (order['LastMatchTime'])) {
             timestamp = this.parse8601 (order['LastMatchTime']);
-        } else if ('Registered' in order) {
+        } else if (('Registered' in order) && (order['Registered'])) {
             timestamp = this.parse8601 (order['Registered']);
-        } else if ('CreatedAt' in order) {
+        } else if (('CreatedAt' in order) && (order['CreatedAt'])) {
             timestamp = this.parse8601 (order['CreatedAt']);
         }
         let price = this.safeFloat (order, 'Price');
@@ -265,6 +267,7 @@ module.exports = class lykke extends Exchange {
             'id': order['Id'],
             'timestamp': timestamp,
             'datetime': this.iso8601 (timestamp),
+            'lastTradeTimestamp': undefined,
             'symbol': symbol,
             'type': undefined,
             'side': undefined,
@@ -281,6 +284,7 @@ module.exports = class lykke extends Exchange {
     }
 
     async fetchOrder (id, symbol = undefined, params = {}) {
+        await this.loadMarkets ();
         let response = await this.privateGetOrdersId (this.extend ({
             'id': id,
         }, params));
@@ -288,11 +292,13 @@ module.exports = class lykke extends Exchange {
     }
 
     async fetchOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets ();
         let response = await this.privateGetOrders ();
         return this.parseOrders (response, undefined, since, limit);
     }
 
     async fetchOpenOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets ();
         let response = await this.privateGetOrders (this.extend ({
             'status': 'InOrderBook',
         }, params));
@@ -300,6 +306,7 @@ module.exports = class lykke extends Exchange {
     }
 
     async fetchClosedOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets ();
         let response = await this.privateGetOrders (this.extend ({
             'status': 'Matched',
         }, params));
@@ -324,16 +331,10 @@ module.exports = class lykke extends Exchange {
             } else {
                 orderbook['asks'] = this.arrayConcat (orderbook['asks'], side['Prices']);
             }
-            let timestamp = this.parse8601 (side['Timestamp']);
-            if (!orderbook['timestamp']) {
-                orderbook['timestamp'] = timestamp;
-            } else {
-                orderbook['timestamp'] = Math.max (orderbook['timestamp'], timestamp);
-            }
+            let sideTimestamp = this.parse8601 (side['Timestamp']);
+            timestamp = (typeof timestamp === 'undefined') ? sideTimestamp : Math.max (timestamp, sideTimestamp);
         }
-        if (!timestamp)
-            timestamp = this.milliseconds ();
-        return this.parseOrderBook (orderbook, orderbook['timestamp'], 'bids', 'asks', 'Price', 'Volume');
+        return this.parseOrderBook (orderbook, timestamp, 'bids', 'asks', 'Price', 'Volume');
     }
 
     parseBidAsk (bidask, priceKey = 0, amountKey = 1) {

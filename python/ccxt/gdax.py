@@ -8,10 +8,12 @@ import base64
 import hashlib
 import json
 from ccxt.base.errors import ExchangeError
-from ccxt.base.errors import NotSupported
 from ccxt.base.errors import AuthenticationError
 from ccxt.base.errors import InsufficientFunds
+from ccxt.base.errors import InvalidAddress
 from ccxt.base.errors import InvalidOrder
+from ccxt.base.errors import OrderNotFound
+from ccxt.base.errors import NotSupported
 
 
 class gdax (Exchange):
@@ -20,7 +22,7 @@ class gdax (Exchange):
         return self.deep_extend(super(gdax, self).describe(), {
             'id': 'gdax',
             'name': 'GDAX',
-            'countries': 'US',
+            'countries': ['US'],
             'rateLimit': 1000,
             'userAgent': self.userAgents['chrome'],
             'has': {
@@ -32,6 +34,7 @@ class gdax (Exchange):
                 'fetchOrders': True,
                 'fetchOpenOrders': True,
                 'fetchClosedOrders': True,
+                'fetchDepositAddress': True,
                 'fetchMyTrades': True,
             },
             'timeframes': {
@@ -91,6 +94,7 @@ class gdax (Exchange):
                     'post': [
                         'deposits/coinbase-account',
                         'deposits/payment-method',
+                        'coinbase-accounts/{id}/addresses',
                         'funding/repay',
                         'orders',
                         'position/close',
@@ -111,7 +115,7 @@ class gdax (Exchange):
                     'tierBased': True,  # complicated tier system per coin
                     'percentage': True,
                     'maker': 0.0,
-                    'taker': 0.25 / 100,  # Fee is 0.25%, 0.3% for ETH/LTC pairs
+                    'taker': 0.3 / 100,  # tiered fee starts at 0.3%
                 },
                 'funding': {
                     'tierBased': False,
@@ -217,6 +221,7 @@ class gdax (Exchange):
             bid = self.safe_float(ticker, 'bid')
         if 'ask' in ticker:
             ask = self.safe_float(ticker, 'ask')
+        last = self.safe_float(ticker, 'price')
         return {
             'symbol': symbol,
             'timestamp': timestamp,
@@ -224,12 +229,14 @@ class gdax (Exchange):
             'high': None,
             'low': None,
             'bid': bid,
+            'bidVolume': None,
             'ask': ask,
+            'askVolume': None,
             'vwap': None,
             'open': None,
-            'close': None,
-            'first': None,
-            'last': self.safe_float(ticker, 'price'),
+            'close': last,
+            'last': last,
+            'previousClose': None,
             'change': None,
             'percentage': None,
             'average': None,
@@ -247,9 +254,8 @@ class gdax (Exchange):
         iso8601 = None
         if timestamp is not None:
             iso8601 = self.iso8601(timestamp)
-        side = 'sell' if (trade['side'] == 'buy') else 'buy'
         symbol = None
-        if not market:
+        if market is None:
             if 'product_id' in trade:
                 marketId = trade['product_id']
                 if marketId in self.markets_by_id:
@@ -258,7 +264,7 @@ class gdax (Exchange):
             symbol = market['symbol']
         feeRate = None
         feeCurrency = None
-        if market:
+        if market is not None:
             feeCurrency = market['quote']
             if 'liquidity' in trade:
                 rateType = 'taker' if (trade['liquidity'] == 'T') else 'maker'
@@ -273,7 +279,11 @@ class gdax (Exchange):
         }
         type = None
         id = self.safe_string(trade, 'trade_id')
+        side = 'sell' if (trade['side'] == 'buy') else 'buy'
         orderId = self.safe_string(trade, 'order_id')
+        # GDAX returns inverted side to fetchMyTrades vs fetchTrades
+        if orderId is not None:
+            side = 'buy' if (trade['side'] == 'buy') else 'sell'
         return {
             'id': id,
             'order': orderId,
@@ -330,7 +340,7 @@ class gdax (Exchange):
             request['start'] = self.ymdhms(since)
             if limit is None:
                 # https://docs.gdax.com/#get-historic-rates
-                limit = 350  # max = 350
+                limit = 300  # max = 300
             request['end'] = self.ymdhms(self.sum(limit * granularity * 1000, since))
         response = self.publicGetProductsIdCandles(self.extend(request, params))
         return self.parse_ohlcvs(response, market, timeframe, since, limit)
@@ -352,7 +362,7 @@ class gdax (Exchange):
     def parse_order(self, order, market=None):
         timestamp = self.parse8601(order['created_at'])
         symbol = None
-        if not market:
+        if market is None:
             if order['product_id'] in self.markets_by_id:
                 market = self.markets_by_id[order['product_id']]
         status = self.parse_order_status(order['status'])
@@ -380,6 +390,7 @@ class gdax (Exchange):
             'info': order,
             'timestamp': timestamp,
             'datetime': self.iso8601(timestamp),
+            'lastTradeTimestamp': None,
             'status': status,
             'symbol': symbol,
             'type': order['type'],
@@ -405,7 +416,7 @@ class gdax (Exchange):
             'status': 'all',
         }
         market = None
-        if symbol:
+        if symbol is not None:
             market = self.market(symbol)
             request['product_id'] = market['id']
         response = self.privateGetOrders(self.extend(request, params))
@@ -415,7 +426,7 @@ class gdax (Exchange):
         self.load_markets()
         request = {}
         market = None
-        if symbol:
+        if symbol is not None:
             market = self.market(symbol)
             request['product_id'] = market['id']
         response = self.privateGetOrders(self.extend(request, params))
@@ -427,17 +438,17 @@ class gdax (Exchange):
             'status': 'done',
         }
         market = None
-        if symbol:
+        if symbol is not None:
             market = self.market(symbol)
             request['product_id'] = market['id']
         response = self.privateGetOrders(self.extend(request, params))
         return self.parse_orders(response, market, since, limit)
 
-    def create_order(self, market, type, side, amount, price=None, params={}):
+    def create_order(self, symbol, type, side, amount, price=None, params={}):
         self.load_markets()
         # oid = str(self.nonce())
         order = {
-            'product_id': self.market_id(market),
+            'product_id': self.market_id(symbol),
             'side': side,
             'size': amount,
             'type': type,
@@ -445,14 +456,27 @@ class gdax (Exchange):
         if type == 'limit':
             order['price'] = price
         response = self.privatePostOrders(self.extend(order, params))
-        return {
-            'info': response,
-            'id': response['id'],
-        }
+        return self.parse_order(response)
 
     def cancel_order(self, id, symbol=None, params={}):
         self.load_markets()
         return self.privateDeleteOrdersId({'id': id})
+
+    def fee_to_precision(self, currency, fee):
+        cost = float(fee)
+        return('{:.' + str(self.currencies[currency]['precision']) + 'f}').format(cost)
+
+    def calculate_fee(self, symbol, type, side, amount, price, takerOrMaker='taker', params={}):
+        market = self.markets[symbol]
+        rate = market[takerOrMaker]
+        cost = amount * price
+        currency = market['quote']
+        return {
+            'type': takerOrMaker,
+            'currency': currency,
+            'rate': rate,
+            'cost': float(self.fee_to_precision(currency, rate * cost)),
+        }
 
     def get_payment_methods(self):
         response = self.privateGetPaymentMethods()
@@ -485,6 +509,7 @@ class gdax (Exchange):
         }
 
     def withdraw(self, currency, amount, address, tag=None, params={}):
+        self.check_address(address)
         self.load_markets()
         request = {
             'currency': currency,
@@ -534,8 +559,35 @@ class gdax (Exchange):
             }
         return {'url': url, 'method': method, 'body': body, 'headers': headers}
 
+    def fetch_deposit_address(self, code, params={}):
+        self.load_markets()
+        currency = self.currency(code)
+        accounts = self.safe_value(self.options, 'coinbaseAccounts')
+        if accounts is None:
+            accounts = self.privateGetCoinbaseAccounts()
+            self.options['coinbaseAccounts'] = accounts  # cache it
+            self.options['coinbaseAccountsByCurrencyId'] = self.index_by(accounts, 'currency')
+        currencyId = currency['id']
+        account = self.safe_value(self.options['coinbaseAccountsByCurrencyId'], currencyId)
+        if account is None:
+            # eslint-disable-next-line quotes
+            raise InvalidAddress(self.id + " fetchDepositAddress() could not find currency code " + code + " with id = " + currencyId + " in self.options['coinbaseAccountsByCurrencyId']")
+        response = self.privatePostCoinbaseAccountsIdAddresses(self.extend({
+            'id': account['id'],
+        }, params))
+        address = self.safe_string(response, 'address')
+        # todo: figure self out
+        # tag = self.safe_string(response, 'addressTag')
+        tag = None
+        return {
+            'currency': code,
+            'address': self.check_address(address),
+            'tag': tag,
+            'info': response,
+        }
+
     def handle_errors(self, code, reason, url, method, headers, body):
-        if code == 400:
+        if (code == 400) or (code == 404):
             if body[0] == '{':
                 response = json.loads(body)
                 message = response['message']
@@ -546,6 +598,8 @@ class gdax (Exchange):
                     raise InvalidOrder(error)
                 elif message == 'Insufficient funds':
                     raise InsufficientFunds(error)
+                elif message == 'NotFound':
+                    raise OrderNotFound(error)
                 elif message == 'Invalid API Key':
                     raise AuthenticationError(error)
                 raise ExchangeError(self.id + ' ' + message)

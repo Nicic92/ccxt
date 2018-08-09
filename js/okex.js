@@ -15,7 +15,6 @@ module.exports = class okex extends okcoinusd {
             'has': {
                 'CORS': false,
                 'futures': true,
-                'hasFetchTickers': true,
                 'fetchTickers': true,
             },
             'urls': {
@@ -26,19 +25,20 @@ module.exports = class okex extends okcoinusd {
                     'private': 'https://www.okex.com/api',
                 },
                 'www': 'https://www.okex.com',
-                'doc': 'https://www.okex.com/rest_getStarted.html',
+                'doc': 'https://github.com/okcoin-okex/API-docs-OKEx.com',
                 'fees': 'https://www.okex.com/fees.html',
             },
+            'commonCurrencies': {
+                'CAN': 'Content And AD Network',
+                'FAIR': 'FairGame',
+                'HOT': 'Hydro Protocol',
+                'MAG': 'Maggie',
+                'YOYO': 'YOYOW',
+            },
+            'options': {
+                'fetchTickersMethod': 'fetch_tickers_from_api',
+            },
         });
-    }
-
-    commonCurrencyCode (currency) {
-        const currencies = {
-            'FAIR': 'FairGame',
-        };
-        if (currency in currencies)
-            return currencies[currency];
-        return currency;
     }
 
     calculateFee (symbol, type, side, amount, price, takerOrMaker = 'taker', params = {}) {
@@ -76,7 +76,7 @@ module.exports = class okex extends okcoinusd {
         return markets;
     }
 
-    async fetchTickers (symbols = undefined, params = {}) {
+    async fetchTickersFromApi (symbols = undefined, params = {}) {
         await this.loadMarkets ();
         let request = {};
         let response = await this.publicGetTickers (this.extend (request, params));
@@ -96,5 +96,25 @@ module.exports = class okex extends okcoinusd {
             result[symbol] = ticker;
         }
         return result;
+    }
+
+    async fetchTickersFromWeb (symbols = undefined, params = {}) {
+        await this.loadMarkets ();
+        let request = {};
+        let response = await this.webGetSpotMarketsTickers (this.extend (request, params));
+        let tickers = response['data'];
+        let result = {};
+        for (let i = 0; i < tickers.length; i++) {
+            let ticker = this.parseTicker (tickers[i]);
+            let symbol = ticker['symbol'];
+            result[symbol] = ticker;
+        }
+        return result;
+    }
+
+    async fetchTickers (symbols = undefined, params = {}) {
+        let method = this.options['fetchTickersMethod'];
+        let response = await this[method] (symbols, params);
+        return response;
     }
 };
